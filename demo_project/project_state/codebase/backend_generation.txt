@@ -1,0 +1,721 @@
+As a senior backend engineer, I will now generate the complete, minimal, and runnable backend codebase for the Employee Time Tracking System. The code adheres strictly to the provided specifications, architecture, and file layout requirements.
+
+***
+
+### File: `backend/requirements.txt`
+
+```text
+fastapi
+uvicorn[standard]
+sqlmodel
+pydantic-settings
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+psycopg2-binary
+```
+
+### File: `backend/.env.example`
+
+```ini
+# Database URL
+# For SQLite (default):
+DB_URL="sqlite:///./test.db"
+# For PostgreSQL (uncomment and replace with your details):
+# DB_URL="postgresql://user:password@host:port/dbname"
+
+# JWT Settings
+# Generate a strong secret key. You can use: openssl rand -hex 32
+SECRET_KEY=09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7
+ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=30
+```
+
+### File: `backend/README.md`
+
+```markdown
+# Employee Time Tracking Backend
+
+This is the backend service for the Employee Time Tracking System, built with Python, FastAPI, and SQLModel.
+
+## Features
+
+-   JWT-based authentication.
+-   Role-based access control (Employee, Manager, Admin).
+-   Endpoints for time tracking (clock in/out).
+-   Admin endpoints for user and project management.
+-   Manager endpoints for viewing team hours.
+-   CSV export for time reports.
+-   Supports SQLite out-of-the-box and PostgreSQL via configuration.
+
+## Prerequisites
+
+-   Python 3.11+
+-   A virtual environment tool (e.g., `venv`)
+
+## Setup Instructions
+
+1.  **Clone the repository** and navigate into the `backend/` directory.
+
+2.  **Create and activate a virtual environment**:
+
+    ```sh
+    python -m venv venv
+    source venv/bin/activate
+    # On Windows, use: venv\Scripts\activate
+    ```
+
+3.  **Install the required dependencies**:
+
+    ```sh
+    pip install -r requirements.txt
+    ```
+
+4.  **Configure your environment**:
+
+    Copy the example environment file:
+    ```sh
+    cp .env.example .env
+    ```
+    The default configuration uses an SQLite database (`test.db`), which requires no further setup. You can edit the `.env` file to change the `SECRET_KEY` or switch to a PostgreSQL database.
+
+## Running the Backend
+
+The application can be started with a single command. This will initialize the database and start the web server.
+
+```sh
+python run_backend.py
+```
+
+The API will be available at `http://localhost:8000`.
+
+A default **admin** user is created on the first run with the following credentials:
+-   **Email**: `admin@example.com`
+-   **Password**: `adminpassword`
+
+You can access the auto-generated API documentation at `http://localhost:8000/docs`.
+
+## Checking the Backend Status
+
+You can verify that the server is running correctly with the check script:
+
+```sh
+python check_backend.py
+```
+You should see a "Backend is running!" message.
+```
+
+### File: `backend/run_backend.py`
+
+```python
+import uvicorn
+
+if __name__ == "__main__":
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+```
+
+### File: `backend/check_backend.py`
+
+```python
+import http.client
+import sys
+
+def check_server(host="localhost", port=8000):
+    """Checks if the backend server is running."""
+    try:
+        conn = http.client.HTTPConnection(host, port)
+        conn.request("GET", "/")
+        response = conn.getresponse()
+        if response.status == 200:
+            print("Backend is running!")
+            return True
+        else:
+            print(f"Backend returned status {response.status}")
+            return False
+    except ConnectionRefusedError:
+        print("Connection refused. Is the backend running?")
+        return False
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return False
+    finally:
+        conn.close()
+
+if __name__ == "__main__":
+    if not check_server():
+        sys.exit(1)
+```
+
+### File: `backend/app/__init__.py`
+
+```python
+# This file can be empty.
+```
+
+### File: `backend/app/core/__init__.py`
+
+```python
+# This file can be empty.
+```
+
+### File: `backend/app/core/config.py`
+
+```python
+from pydantic_settings import BaseSettings
+
+class Settings(BaseSettings):
+    DB_URL: str = "sqlite:///./test.db"
+    SECRET_KEY: str = "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7"
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+
+    class Config:
+        env_file = ".env"
+
+settings = Settings()
+```
+
+### File: `backend/app/core/db.py`
+
+```python
+from sqlmodel import create_engine, Session, SQLModel
+from app.core.config import settings
+
+# The connect_args is needed only for SQLite
+connect_args = {"check_same_thread": False} if "sqlite" in settings.DB_URL else {}
+engine = create_engine(settings.DB_URL, echo=True, connect_args=connect_args)
+
+def create_db_and_tables():
+    # Import all models here before calling create_all
+    # so that they are registered with SQLModel's metadata
+    from app import models 
+    SQLModel.metadata.create_all(engine)
+
+def get_session():
+    with Session(engine) as session:
+        yield session
+```
+
+### File: `backend/app/core/security.py`
+
+```python
+from datetime import datetime, timedelta, timezone
+from typing import Any, Union
+from jose import jwt
+from passlib.context import CryptContext
+from app.core.config import settings
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+ALGORITHM = settings.ALGORITHM
+SECRET_KEY = settings.SECRET_KEY
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
+
+def create_access_token(subject: Union[str, Any], expires_delta: timedelta = None) -> str:
+    if expires_delta:
+        expire = datetime.now(timezone.utc) + expires_delta
+    else:
+        expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode = {"exp": expire, "sub": str(subject)}
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
+```
+
+### File: `backend/app/models.py`
+
+```python
+import enum
+from typing import List, Optional
+from datetime import datetime
+from sqlmodel import Field, Relationship, SQLModel
+
+class UserRole(str, enum.Enum):
+    employee = "employee"
+    manager = "manager"
+    admin = "admin"
+
+class User(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    email: str = Field(unique=True, index=True)
+    hashed_password: str
+    first_name: str
+    last_name: str
+    is_active: bool = Field(default=True)
+    role: UserRole
+    manager_id: Optional[int] = Field(default=None, foreign_key="user.id")
+
+    manager: Optional["User"] = Relationship(
+        back_populates="team_members",
+        sa_relationship_kwargs=dict(remote_side="User.id")
+    )
+    team_members: List["User"] = Relationship(back_populates="manager")
+    time_entries: List["TimeEntry"] = Relationship(back_populates="user")
+
+class Project(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+    is_active: bool = Field(default=True)
+    time_entries: List["TimeEntry"] = Relationship(back_populates="project")
+
+class TimeEntry(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    start_time: datetime
+    end_time: Optional[datetime] = Field(default=None)
+    description: str
+    
+    user_id: int = Field(foreign_key="user.id")
+    project_id: int = Field(foreign_key="project.id")
+
+    user: User = Relationship(back_populates="time_entries")
+    project: Project = Relationship(back_populates="time_entries")
+```
+
+### File: `backend/app/schemas.py`
+
+```python
+from pydantic import BaseModel, EmailStr
+from typing import List, Optional
+from datetime import datetime, date
+from app.models import UserRole
+
+# Token
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    email: Optional[str] = None
+
+# User
+class UserBase(BaseModel):
+    email: EmailStr
+    first_name: str
+    last_name: str
+
+class UserCreate(UserBase):
+    password: str
+    role: UserRole
+
+class UserRead(UserBase):
+    id: int
+    is_active: bool
+    role: UserRole
+    manager_id: Optional[int] = None
+
+class UserWithManager(UserRead):
+    manager: Optional[UserRead] = None
+
+# Project
+class ProjectBase(BaseModel):
+    name: str
+
+class ProjectCreate(ProjectBase):
+    pass
+
+class ProjectRead(ProjectBase):
+    id: int
+    is_active: bool
+
+# TimeEntry
+class TimeEntryBase(BaseModel):
+    description: str
+    project_id: int
+
+class TimeEntryClockIn(BaseModel):
+    project_id: int
+    description: str
+
+class TimeEntryRead(TimeEntryBase):
+    id: int
+    start_time: datetime
+    end_time: Optional[datetime] = None
+    user_id: int
+
+class TimeEntryWithProject(TimeEntryRead):
+    project: ProjectRead
+
+# Reports
+class TeamMemberHours(BaseModel):
+    employee: UserRead
+    total_hours: float
+    entries: List[TimeEntryWithProject]
+```
+
+### File: `backend/app/deps.py`
+
+```python
+from typing import Generator
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from jose import jwt, JWTError
+from pydantic import ValidationError
+from sqlmodel import Session
+from app.core import security
+from app.core.config import settings
+from app.core.db import get_session
+from app import models, schemas
+
+reusable_oauth2 = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+
+def get_current_user(
+    session: Session = Depends(get_session), token: str = Depends(reusable_oauth2)
+) -> models.User:
+    try:
+        payload = jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
+        token_data = schemas.TokenData(**payload)
+    except (JWTError, ValidationError):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Could not validate credentials",
+        )
+    user = session.query(models.User).filter(models.User.email == token_data.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+def get_current_active_user(
+    current_user: models.User = Depends(get_current_user),
+) -> models.User:
+    if not current_user.is_active:
+        raise HTTPException(status_code=400, detail="Inactive user")
+    return current_user
+
+def get_current_active_employee(
+    current_user: models.User = Depends(get_current_active_user),
+) -> models.User:
+    if current_user.role not in [models.UserRole.employee, models.UserRole.manager, models.UserRole.admin]:
+        raise HTTPException(
+            status_code=403, detail="The user doesn't have enough privileges"
+        )
+    return current_user
+
+def get_current_active_manager(
+    current_user: models.User = Depends(get_current_active_user),
+) -> models.User:
+    if current_user.role not in [models.UserRole.manager, models.UserRole.admin]:
+        raise HTTPException(
+            status_code=403, detail="The user doesn't have enough privileges"
+        )
+    return current_user
+
+def get_current_active_admin(
+    current_user: models.User = Depends(get_current_active_user),
+) -> models.User:
+    if current_user.role != models.UserRole.admin:
+        raise HTTPException(
+            status_code=403, detail="The user doesn't have enough privileges"
+        )
+    return current_user
+```
+
+### File: `backend/app/api/__init__.py`
+
+```python
+# This file can be empty.
+```
+
+### File: `backend/app/api/routes.py`
+
+```python
+import csv
+import io
+from datetime import date, timedelta, datetime
+from typing import List
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.responses import StreamingResponse
+from sqlmodel import Session, select
+from app import models, schemas, deps
+from app.core import security
+
+api_router = APIRouter()
+
+# --- Authentication ---
+@api_router.post("/auth/login", response_model=schemas.Token)
+def login_for_access_token(
+    session: Session = Depends(deps.get_session),
+    form_data: OAuth2PasswordRequestForm = Depends()
+):
+    user = session.query(models.User).filter(models.User.email == form_data.username).first()
+    if not user or not security.verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token = security.create_access_token(subject=user.email)
+    return {"access_token": access_token, "token_type": "bearer"}
+
+# --- Employee Endpoints ---
+@api_router.post("/time-entries/clock-in", response_model=schemas.TimeEntryRead)
+def clock_in(
+    *,
+    session: Session = Depends(deps.get_session),
+    current_user: models.User = Depends(deps.get_current_active_employee),
+    entry_in: schemas.TimeEntryClockIn,
+):
+    # Check for existing open time entries
+    open_entry = session.exec(select(models.TimeEntry).where(
+        models.TimeEntry.user_id == current_user.id,
+        models.TimeEntry.end_time == None
+    )).first()
+    if open_entry:
+        raise HTTPException(status_code=400, detail="User already clocked in. Clock out first.")
+
+    db_entry = models.TimeEntry(
+        start_time=datetime.utcnow(),
+        description=entry_in.description,
+        project_id=entry_in.project_id,
+        user_id=current_user.id
+    )
+    session.add(db_entry)
+    session.commit()
+    session.refresh(db_entry)
+    return db_entry
+
+@api_router.post("/time-entries/{entry_id}/clock-out", response_model=schemas.TimeEntryRead)
+def clock_out(
+    *,
+    session: Session = Depends(deps.get_session),
+    current_user: models.User = Depends(deps.get_current_active_employee),
+    entry_id: int,
+):
+    entry = session.get(models.TimeEntry, entry_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Time entry not found")
+    if entry.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to clock out this entry")
+    if entry.end_time:
+        raise HTTPException(status_code=400, detail="This entry is already clocked out")
+
+    entry.end_time = datetime.utcnow()
+    session.add(entry)
+    session.commit()
+    session.refresh(entry)
+    return entry
+
+@api_router.get("/time-entries/me", response_model=List[schemas.TimeEntryWithProject])
+def view_own_hours(
+    *,
+    session: Session = Depends(deps.get_session),
+    current_user: models.User = Depends(deps.get_current_active_employee),
+    start_date: date,
+    end_date: date,
+):
+    entries = session.exec(select(models.TimeEntry).where(
+        models.TimeEntry.user_id == current_user.id,
+        models.TimeEntry.start_time >= start_date,
+        models.TimeEntry.start_time < (end_date + timedelta(days=1))
+    ).order_by(models.TimeEntry.start_time.desc())).all()
+    return entries
+
+# --- Manager Endpoints ---
+@api_router.get("/reports/team", response_model=List[schemas.TeamMemberHours])
+def view_team_hours(
+    *,
+    session: Session = Depends(deps.get_session),
+    current_user: models.User = Depends(deps.get_current_active_manager),
+    start_date: date,
+    end_date: date,
+):
+    team_members = session.exec(select(models.User).where(models.User.manager_id == current_user.id)).all()
+    report = []
+    for member in team_members:
+        entries = session.exec(select(models.TimeEntry).where(
+            models.TimeEntry.user_id == member.id,
+            models.TimeEntry.start_time >= start_date,
+            models.TimeEntry.start_time < (end_date + timedelta(days=1))
+        )).all()
+
+        total_seconds = sum(
+            (entry.end_time - entry.start_time).total_seconds()
+            for entry in entries if entry.end_time
+        )
+        report.append(
+            schemas.TeamMemberHours(
+                employee=member,
+                total_hours=round(total_seconds / 3600, 2),
+                entries=entries
+            )
+        )
+    return report
+
+# --- Admin Endpoints ---
+@api_router.post("/admin/users", response_model=schemas.UserRead, status_code=201)
+def create_user(
+    *,
+    session: Session = Depends(deps.get_session),
+    current_user: models.User = Depends(deps.get_current_active_admin),
+    user_in: schemas.UserCreate,
+):
+    user = session.exec(select(models.User).where(models.User.email == user_in.email)).first()
+    if user:
+        raise HTTPException(status_code=400, detail="User with this email already exists.")
+    
+    hashed_password = security.get_password_hash(user_in.password)
+    db_user = models.User(
+        **user_in.dict(exclude={"password"}),
+        hashed_password=hashed_password
+    )
+    session.add(db_user)
+    session.commit()
+    session.refresh(db_user)
+    return db_user
+
+@api_router.get("/admin/users", response_model=List[schemas.UserRead])
+def list_users(
+    session: Session = Depends(deps.get_session),
+    current_user: models.User = Depends(deps.get_current_active_admin),
+    skip: int = 0,
+    limit: int = 100,
+):
+    users = session.exec(select(models.User).offset(skip).limit(limit)).all()
+    return users
+
+@api_router.put("/admin/users/{user_id}/deactivate", response_model=schemas.UserRead)
+def deactivate_user(
+    *,
+    session: Session = Depends(deps.get_session),
+    current_user: models.User = Depends(deps.get_current_active_admin),
+    user_id: int,
+):
+    user = session.get(models.User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.is_active = False
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return user
+
+@api_router.put("/admin/users/{employee_id}/assign-manager", response_model=schemas.UserRead)
+def assign_manager(
+    *,
+    session: Session = Depends(deps.get_session),
+    current_user: models.User = Depends(deps.get_current_active_admin),
+    employee_id: int,
+    manager_id: int,
+):
+    employee = session.get(models.User, employee_id)
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    
+    manager = session.get(models.User, manager_id)
+    if not manager:
+        raise HTTPException(status_code=404, detail="Manager not found")
+    if manager.role not in [models.UserRole.manager, models.UserRole.admin]:
+        raise HTTPException(status_code=400, detail="Assigned user must be a manager or admin")
+    
+    employee.manager_id = manager.id
+    session.add(employee)
+    session.commit()
+    session.refresh(employee)
+    return employee
+
+@api_router.post("/admin/projects", response_model=schemas.ProjectRead, status_code=201)
+def create_project(
+    *,
+    session: Session = Depends(deps.get_session),
+    current_user: models.User = Depends(deps.get_current_active_admin),
+    project_in: schemas.ProjectCreate,
+):
+    db_project = models.Project.from_orm(project_in)
+    session.add(db_project)
+    session.commit()
+    session.refresh(db_project)
+    return db_project
+
+# --- Report Endpoints ---
+@api_router.get("/reports/export/csv")
+def export_hours_csv(
+    *,
+    session: Session = Depends(deps.get_session),
+    current_user: models.User = Depends(deps.get_current_active_manager),
+    start_date: date,
+    end_date: date,
+):
+    team_members = session.exec(select(models.User).where(models.User.manager_id == current_user.id)).all()
+    if not team_members:
+        team_members = [current_user] # If not a manager, export own hours
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    writer.writerow(["employee_id", "employee_name", "project_name", "date", "start_time", "end_time", "hours_worked", "description"])
+    
+    for member in team_members:
+        entries = session.exec(select(models.TimeEntry).where(
+            models.TimeEntry.user_id == member.id,
+            models.TimeEntry.start_time >= start_date,
+            models.TimeEntry.start_time < (end_date + timedelta(days=1))
+        )).all()
+        
+        for entry in entries:
+            hours_worked = ""
+            if entry.end_time:
+                hours_worked = round((entry.end_time - entry.start_time).total_seconds() / 3600, 2)
+            
+            writer.writerow([
+                member.id,
+                f"{member.first_name} {member.last_name}",
+                entry.project.name,
+                entry.start_time.strftime("%Y-%m-%d"),
+                entry.start_time.strftime("%H:%M:%S"),
+                entry.end_time.strftime("%H:%M:%S") if entry.end_time else "",
+                hours_worked,
+                entry.description
+            ])
+            
+    output.seek(0)
+    return StreamingResponse(
+        output,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=time_report_{start_date}_to_{end_date}.csv"}
+    )
+```
+
+### File: `backend/app/main.py`
+
+```python
+from fastapi import FastAPI
+from sqlmodel import Session, select
+from app.core.db import create_db_and_tables, engine
+from app.api.routes import api_router
+from app.core import security
+from app import models
+
+app = FastAPI(title="Employee Time Tracking API")
+
+app.include_router(api_router, prefix="/api/v1")
+
+@app.on_event("startup")
+def on_startup():
+    create_db_and_tables()
+    # Create a default admin user if one doesn't exist
+    with Session(engine) as session:
+        user = session.exec(select(models.User).where(models.User.email == "admin@example.com")).first()
+        if not user:
+            admin_user = models.User(
+                email="admin@example.com",
+                hashed_password=security.get_password_hash("adminpassword"),
+                first_name="Admin",
+                last_name="User",
+                role=models.UserRole.admin,
+                is_active=True
+            )
+            session.add(admin_user)
+            session.commit()
+            print("Default admin user created.")
+
+@app.get("/")
+def read_root():
+    return {"message": "Welcome to the Employee Time Tracking API"}
+```

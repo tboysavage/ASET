@@ -1,0 +1,156 @@
+---FILE_MAP_START---
+requirements.txt
+run_backend.py
+check_backend.py
+app/__init__.py
+app/main.py
+app/core/__init__.py
+app/core/config.py
+app/core/db.py
+app/models.py
+---FILE_MAP_END---
+---FILE_START requirements.txt---
+fastapi
+uvicorn[standard]
+sqlmodel
+pydantic-settings
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+psycopg2-binary
+---FILE_END requirements.txt---
+---FILE_START run_backend.py---
+import uvicorn
+
+if __name__ == "__main__":
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+---FILE_END run_backend.py---
+---FILE_START check_backend.py---
+import http.client
+import sys
+
+def check_server(host="localhost", port=8000):
+    """Checks if the backend server is running."""
+    conn = None
+    try:
+        conn = http.client.HTTPConnection(host, port)
+        conn.request("GET", "/")
+        response = conn.getresponse()
+        if response.status == 200:
+            print("Backend is running!")
+            return True
+        else:
+            print(f"Backend returned status {response.status}")
+            return False
+    except ConnectionRefusedError:
+        print("Connection refused. Is the backend running?")
+        return False
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+if __name__ == "__main__":
+    if not check_server():
+        sys.exit(1)
+---FILE_END check_backend.py---
+---FILE_START app/__init__.py---
+---FILE_END app/__init__.py---
+---FILE_START app/main.py---
+from fastapi import FastAPI
+from app.core.db import create_db_and_tables
+
+app = FastAPI(title="Employee Time Tracking System")
+
+@app.on_event("startup")
+def on_startup():
+    create_db_and_tables()
+
+@app.get("/")
+def read_root():
+    return {"status": "ok"}
+---FILE_END app/main.py---
+---FILE_START app/core/__init__.py---
+---FILE_END app/core/__init__.py---
+---FILE_START app/core/config.py---
+from pydantic_settings import BaseSettings
+
+class Settings(BaseSettings):
+    DB_URL: str = "sqlite:///./test.db"
+    SECRET_KEY: str = "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7"
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+
+    class Config:
+        env_file = ".env"
+
+settings = Settings()
+---FILE_END app/core/config.py---
+---FILE_START app/core/db.py---
+from sqlmodel import create_engine, Session, SQLModel
+from app.core.config import settings
+
+# The connect_args is needed only for SQLite
+connect_args = {"check_same_thread": False} if "sqlite" in settings.DB_URL else {}
+engine = create_engine(settings.DB_URL, echo=True, connect_args=connect_args)
+
+def create_db_and_tables():
+    # Import all models here before calling create_all
+    # so that they are registered with SQLModel's metadata
+    from app import models 
+    SQLModel.metadata.create_all(engine)
+
+def get_session():
+    with Session(engine) as session:
+        yield session
+---FILE_END app/core/db.py---
+---FILE_START app/models.py---
+import enum
+from typing import List, Optional
+from datetime import date
+from sqlmodel import Field, Relationship, SQLModel
+
+class UserRole(str, enum.Enum):
+    employee = "employee"
+    manager = "manager"
+    admin = "admin"
+
+class User(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    email: str = Field(unique=True, index=True)
+    hashed_password: str
+    first_name: str
+    last_name: str
+    is_active: bool = Field(default=True)
+    role: UserRole = Field(default=UserRole.employee)
+    
+    manager_id: Optional[int] = Field(default=None, foreign_key="user.id")
+    manager: Optional["User"] = Relationship(
+        back_populates="team_members",
+        sa_relationship_kwargs=dict(remote_side="User.id")
+    )
+    
+    team_members: List["User"] = Relationship(back_populates="manager")
+    time_entries: List["TimeEntry"] = Relationship(back_populates="user")
+
+class Project(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+    is_active: bool = Field(default=True)
+    
+    time_entries: List["TimeEntry"] = Relationship(back_populates="project")
+
+class TimeEntry(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    date: date
+    hours_worked: float
+    description: Optional[str] = Field(default=None)
+    
+    user_id: int = Field(foreign_key="user.id")
+    project_id: int = Field(foreign_key="project.id")
+
+    user: User = Relationship(back_populates="time_entries")
+    project: Project = Relationship(back_populates="time_entries")
+---FILE_END app/models.py---

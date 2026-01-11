@@ -1,0 +1,405 @@
+---FILE_MAP_START---
+app/__init__.py
+app/api/__init__.py
+app/api/crud.py
+app/api/routes.py
+app/core/__init__.py
+app/core/config.py
+app/core/db.py
+app/core/security.py
+app/deps.py
+app/main.py
+app/models.py
+app/schemas.py
+check_backend.py
+run_backend.py
+---FILE_MAP_END---
+---FILE_START app/__init__.py---
+# This file can be empty.
+---FILE_END app/__init__.py---
+---FILE_START app/api/__init__.py---
+# This file can be empty.
+---FILE_END app/api/__init__.py---
+---FILE_START app/api/crud.py---
+from sqlmodel import Session, select
+from app.core.security import get_password_hash
+from app.models import User
+from app.schemas import UserCreate
+
+def get_user_by_email(session: Session, *, email: str) -> User | None:
+    statement = select(User).where(User.email == email)
+    return session.exec(statement).first()
+
+def create_user(session: Session, *, user_in: UserCreate) -> User:
+    hashed_password = get_password_hash(user_in.password)
+    # Create a dictionary from the input schema, excluding the plain password
+    user_data = user_in.model_dump(exclude={"password"})
+    # Add the hashed password to the dictionary
+    user_data["hashed_password"] = hashed_password
+    # Create the User model instance
+    db_user = User(**user_data)
+    
+    session.add(db_user)
+    session.commit()
+    session.refresh(db_user)
+    return db_user
+---FILE_END app/api/crud.py---
+---FILE_START app/api/routes.py---
+from typing import Any
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlmodel import Session
+
+from app.api import crud
+from app.core import security
+from app.deps import get_current_user, get_session
+from app.models import User
+from app.schemas import Token, UserPublic
+
+router = APIRouter()
+
+
+@router.post("/token", response_model=Token)
+def login_for_access_token(
+    session: Session = Depends(get_session), form_data: OAuth2PasswordRequestForm = Depends()
+) -> Any:
+    """
+    OAuth2 compatible token login, get an access token for future requests.
+    """
+    user = crud.get_user_by_email(session, email=form_data.username)
+    if not user or not security.verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(status_code=400, detail="Incorrect email or password")
+    elif not user.is_active:
+        raise HTTPException(status_code=400, detail="Inactive user")
+    access_token = security.create_access_token(subject=user.email)
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+@router.get("/users/me", response_model=UserPublic)
+def read_users_me(current_user: User = Depends(get_current_user)) -> Any:
+    """
+    Get current user.
+    """
+    return current_user
+---FILE_END app/api/routes.py---
+---FILE_START app/core/__init__.py---
+# This file can be empty.
+---FILE_END app/core/__init__.py---
+---FILE_START app/core/config.py---
+from pydantic_settings import BaseSettings
+
+class Settings(BaseSettings):
+    DB_URL: str = "sqlite:///./test.db"
+    SECRET_KEY: str = "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7"
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+
+    class Config:
+        env_file = ".env"
+
+settings = Settings()
+---FILE_END app/core/config.py---
+---FILE_START app/core/db.py---
+from sqlmodel import create_engine, Session, SQLModel
+from app.core.config import settings
+
+# The connect_args is needed only for SQLite
+connect_args = {"check_same_thread": False} if "sqlite" in settings.DB_URL else {}
+engine = create_engine(settings.DB_URL, echo=True, connect_args=connect_args)
+
+def create_db_and_tables():
+    # Import all models here before calling create_all
+    # so that they are registered with SQLModel's metadata
+    from app import models 
+    SQLModel.metadata.create_all(engine)
+
+def get_session():
+    with Session(engine) as session:
+        yield session
+---FILE_END app/core/db.py---
+---FILE_START app/core/security.py---
+from datetime import datetime, timedelta, timezone
+from typing import Any, Union
+from jose import jwt
+from passlib.context import CryptContext
+from app.core.config import settings
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+ALGORITHM = settings.ALGORITHM
+SECRET_KEY = settings.SECRET_KEY
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
+
+def create_access_token(subject: Union[str, Any], expires_delta: timedelta = None) -> str:
+    if expires_delta:
+        expire = datetime.now(timezone.utc) + expires_delta
+    else:
+        expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode = {"exp": expire, "sub": str(subject)}
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
+---FILE_END app/core/security.py---
+---FILE_START app/deps.py---
+from typing import Generator
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from jose import jwt, JWTError
+from pydantic import ValidationError
+from sqlmodel import Session, select
+
+from app.core import security
+from app.core.config import settings
+from app.core.db import get_session
+from app.models import User
+from app.schemas import TokenData
+
+reusable_oauth2 = OAuth2PasswordBearer(
+    tokenUrl=f"/api/v1/token"
+)
+
+def get_current_user(
+    session: Session = Depends(get_session), token: str = Depends(reusable_oauth2)
+) -> User:
+    try:
+        payload = jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
+        token_data = TokenData(email=payload.get("sub"))
+    except (JWTError, ValidationError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Could not validate credentials",
+        ) from e
+    
+    if token_data.email is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Could not validate credentials",
+        )
+        
+    statement = select(User).where(User.email == token_data.email)
+    user = session.exec(statement).first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not user.is_active:
+        raise HTTPException(status_code=400, detail="Inactive user")
+    return user
+---FILE_END app/deps.py---
+---FILE_START app/main.py---
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from sqlmodel import Session, select
+
+from app.api.routes import router as api_router
+from app.core.db import create_db_and_tables, engine
+from app.models import User, UserRole
+from app.schemas import UserCreate
+from app.api import crud
+
+def create_initial_user():
+    with Session(engine) as session:
+        user = session.exec(select(User).where(User.email == "admin@example.com")).first()
+        if not user:
+            print("Creating initial admin user")
+            user_in = UserCreate(
+                email="admin@example.com",
+                password="adminpassword",
+                first_name="Admin",
+                last_name="User",
+                role=UserRole.admin,
+            )
+            crud.create_user(session=session, user_in=user_in)
+            print("Initial admin user created")
+        else:
+            print("Initial admin user already exists")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("Lifespan startup: Creating database and tables...")
+    create_db_and_tables()
+    create_initial_user()
+    yield
+    print("Lifespan shutdown.")
+
+
+app = FastAPI(title="Employee Time Tracking System", lifespan=lifespan)
+
+
+@app.get("/")
+def read_root():
+    return {"message": "Employee Time Tracking Backend is running!"}
+
+
+app.include_router(api_router, prefix="/api/v1")
+---FILE_END app/main.py---
+---FILE_START app/models.py---
+import enum
+from typing import List, Optional
+from datetime import date
+from sqlmodel import Field, Relationship, SQLModel
+
+class UserRole(str, enum.Enum):
+    employee = "employee"
+    manager = "manager"
+    admin = "admin"
+
+class User(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    email: str = Field(unique=True, index=True)
+    hashed_password: str
+    first_name: str
+    last_name: str
+    is_active: bool = Field(default=True)
+    role: UserRole
+    manager_id: Optional[int] = Field(default=None, foreign_key="user.id")
+
+    manager: Optional["User"] = Relationship(
+        back_populates="team_members",
+        sa_relationship_kwargs=dict(remote_side="User.id")
+    )
+    team_members: List["User"] = Relationship(back_populates="manager")
+    time_entries: List["TimeEntry"] = Relationship(back_populates="user")
+
+class Project(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+    is_active: bool = Field(default=True)
+
+    time_entries: List["TimeEntry"] = Relationship(back_populates="project")
+
+class TimeEntry(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    date: date
+    hours_worked: float
+    description: str
+    
+    user_id: int = Field(foreign_key="user.id")
+    project_id: int = Field(foreign_key="project.id")
+
+    user: User = Relationship(back_populates="time_entries")
+    project: Project = Relationship(back_populates="time_entries")
+---FILE_END app/models.py---
+---FILE_START app/schemas.py---
+from pydantic import BaseModel, EmailStr
+from typing import Optional
+from datetime import date
+from app.models import UserRole
+
+# Token
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    email: Optional[EmailStr] = None
+
+# User
+class UserBase(BaseModel):
+    email: EmailStr
+    first_name: str
+    last_name: str
+    role: UserRole
+    is_active: Optional[bool] = True
+    manager_id: Optional[int] = None
+
+class UserCreate(UserBase):
+    password: str
+
+class UserPublic(UserBase):
+    id: int
+    
+    class Config:
+        from_attributes = True
+
+# Project
+class ProjectBase(BaseModel):
+    name: str
+    is_active: Optional[bool] = True
+
+class ProjectCreate(ProjectBase):
+    pass
+
+class ProjectPublic(ProjectBase):
+    id: int
+
+    class Config:
+        from_attributes = True
+
+# TimeEntry
+class TimeEntryBase(BaseModel):
+    date: date
+    hours_worked: float
+    description: str
+    project_id: int
+
+class TimeEntryCreate(TimeEntryBase):
+    pass
+
+class TimeEntryPublic(TimeEntryBase):
+    id: int
+    user_id: int
+
+    class Config:
+        from_attributes = True
+---FILE_END app/schemas.py---
+---FILE_START check_backend.py---
+import http.client
+import sys
+import os
+
+def check_server(host="localhost", port=8000):
+    """Checks if the backend server is running."""
+    conn = None
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+        # Check the root path
+        conn.request("GET", "/")
+        response = conn.getresponse()
+        if response.status == 200:
+            body = response.read().decode()
+            print(f"GET / check successful: Status {response.status}, Body: {body}")
+        else:
+            print(f"GET / check failed: Status {response.status}")
+            return False
+
+        # Check the docs path
+        conn.request("GET", "/docs")
+        response = conn.getresponse()
+        if response.status == 200:
+            print(f"GET /docs check successful: Status {response.status}")
+            return True
+        else:
+            print(f"GET /docs check failed: Status {response.status}")
+            return False
+
+    except ConnectionRefusedError:
+        print(f"Connection refused on {host}:{port}. Is the backend running?")
+        return False
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+if __name__ == "__main__":
+    if not check_server():
+        sys.exit(1)
+    else:
+        print("Backend is running!")
+        sys.exit(0)
+---FILE_END check_backend.py---
+---FILE_START run_backend.py---
+import uvicorn
+
+if __name__ == "__main__":
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+---FILE_END run_backend.py---

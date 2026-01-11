@@ -1,0 +1,7 @@
+pydantic>=2.0
+pyyaml>=6.0
+streamlit>=1.30
+
+# Hybrid LLMs
+google-genai>=1.57.0
+requests>=2.31

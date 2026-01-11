@@ -1,0 +1,24 @@
+verbose: true
+
+llm:
+  router:
+    # routes: architect/tests/integrate -> vertex, fragment/debug_fast -> ollama
+    default: ollama
+    routes:
+      architect: vertex
+      tests: vertex
+      integrate: vertex
+      fragment: ollama
+      debug_fast: ollama
+
+  vertex:
+    project: "gen-lang-client-0455622375"
+    location: "us-central1"
+    model: "gemini-2.5-pro"
+    temperature: 0.2
+
+  ollama:
+    base_url: "http://127.0.0.1:11434"
+    model: "qwen2.5-coder:3b"
+    temperature: 0.2
+    timeout_seconds: 300

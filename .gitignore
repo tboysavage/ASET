@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.env
+.venv/
+venv/
+
+# OS
+.DS_Store
+
+# Streamlit
+.streamlit/
+
+# ASET generated output
+aset2/workspace/
+aset/demo_project/
+# IDEs
+.vscode/
+.idea/

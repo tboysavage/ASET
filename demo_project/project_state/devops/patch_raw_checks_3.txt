@@ -1,0 +1,560 @@
+---FILE_MAP_START---
+requirements.txt
+run_backend.py
+check_backend.py
+app/__init__.py
+app/main.py
+app/models.py
+app/schemas.py
+app/core/__init__.py
+app/core/config.py
+app/core/db.py
+app/core/security.py
+app/api/__init__.py
+app/api/deps.py
+app/api/routes.py
+---FILE_MAP_END---
+---FILE_START requirements.txt---
+fastapi
+uvicorn[standard]
+sqlmodel
+pydantic-settings
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+psycopg2-binary
+---FILE_END requirements.txt---
+---FILE_START run_backend.py---
+import uvicorn
+
+if __name__ == "__main__":
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+---FILE_END run_backend.py---
+---FILE_START check_backend.py---
+import http.client
+import sys
+import time
+
+def check_server(host="localhost", port=8000, retries=5, delay=2):
+    """Checks if the backend server is running and healthy."""
+    print(f"Checking backend at http://{host}:{port}/health")
+    for i in range(retries):
+        try:
+            conn = http.client.HTTPConnection(host, port, timeout=5)
+            conn.request("GET", "/health")
+            response = conn.getresponse()
+            if response.status == 200:
+                print("Backend is running!")
+                conn.close()
+                return True
+            else:
+                print(f"Backend returned status {response.status}. Retrying in {delay}s...")
+        except (ConnectionRefusedError, http.client.RemoteDisconnected) as e:
+            print(f"Connection error: {e}. Is the backend running? Retrying in {delay}s...")
+        except Exception as e:
+            print(f"An error occurred: {e}. Retrying in {delay}s...")
+        finally:
+            if 'conn' in locals() and conn.sock:
+                 conn.close()
+
+        if i < retries - 1:
+            time.sleep(delay)
+
+    print("Backend check failed after multiple retries.")
+    return False
+
+if __name__ == "__main__":
+    if not check_server():
+        sys.exit(1)
+---FILE_END check_backend.py---
+---FILE_START app/__init__.py---
+# This file can be empty.
+---FILE_END app/__init__.py---
+---FILE_START app/main.py---
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from sqlmodel import Session, select
+
+from app.api.routes import router as api_router
+from app.core.config import settings
+from app.core.db import create_db_and_tables, engine
+from app.core.security import get_password_hash
+from app.models import User, UserRole
+
+
+def create_first_superuser():
+    with Session(engine) as session:
+        statement = select(User).where(User.email == "admin@example.com")
+        user = session.exec(statement).first()
+        if not user:
+            user_in = User(
+                email="admin@example.com",
+                hashed_password=get_password_hash("adminpassword"),
+                first_name="Admin",
+                last_name="User",
+                role=UserRole.admin,
+                is_active=True,
+            )
+            session.add(user_in)
+            session.commit()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("Creating database and tables...")
+    create_db_and_tables()
+    create_first_superuser()
+    yield
+
+
+app = FastAPI(title="Employee Time Tracking System", lifespan=lifespan)
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
+
+
+app.include_router(api_router, prefix="/api")
+---FILE_END app/main.py---
+---FILE_START app/models.py---
+import enum
+from datetime import date
+from typing import List, Optional
+
+from sqlmodel import Field, Relationship, SQLModel
+
+
+class UserRole(str, enum.Enum):
+    employee = "employee"
+    manager = "manager"
+    admin = "admin"
+
+
+class User(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    email: str = Field(unique=True, index=True)
+    hashed_password: str
+    first_name: str
+    last_name: str
+    is_active: bool = Field(default=True)
+    role: UserRole
+    manager_id: Optional[int] = Field(default=None, foreign_key="user.id")
+
+    manager: Optional["User"] = Relationship(
+        back_populates="team_members",
+        sa_relationship_kwargs=dict(remote_side="User.id"),
+    )
+    team_members: List["User"] = Relationship(back_populates="manager")
+    time_entries: List["TimeEntry"] = Relationship(back_populates="user")
+
+
+class Project(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+    is_active: bool = Field(default=True)
+
+    time_entries: List["TimeEntry"] = Relationship(back_populates="project")
+
+
+class TimeEntry(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    date: date
+    hours_worked: float
+    description: Optional[str] = Field(default=None)
+
+    user_id: int = Field(foreign_key="user.id")
+    project_id: int = Field(foreign_key="project.id")
+
+    user: "User" = Relationship(back_populates="time_entries")
+    project: "Project" = Relationship(back_populates="time_entries")
+---FILE_END app/models.py---
+---FILE_START app/schemas.py---
+from datetime import date
+from typing import List, Optional
+
+from pydantic import BaseModel, EmailStr
+
+from app.models import UserRole
+
+
+# Token
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+
+class TokenData(BaseModel):
+    email: Optional[str] = None
+
+
+# User
+class UserBase(BaseModel):
+    email: EmailStr
+    first_name: str
+    last_name: str
+    role: UserRole
+    is_active: bool = True
+    manager_id: Optional[int] = None
+
+
+class UserCreate(UserBase):
+    password: str
+
+
+class UserUpdate(BaseModel):
+    email: Optional[EmailStr] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    role: Optional[UserRole] = None
+    is_active: Optional[bool] = None
+    manager_id: Optional[int] = None
+    password: Optional[str] = None
+
+
+class UserRead(UserBase):
+    id: int
+
+    class Config:
+        from_attributes = True
+
+
+# Project
+class ProjectBase(BaseModel):
+    name: str
+    is_active: bool = True
+
+
+class ProjectCreate(ProjectBase):
+    pass
+
+
+class ProjectUpdate(BaseModel):
+    name: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class ProjectRead(ProjectBase):
+    id: int
+
+    class Config:
+        from_attributes = True
+
+
+# TimeEntry
+class TimeEntryBase(BaseModel):
+    date: date
+    hours_worked: float
+    description: Optional[str] = None
+    project_id: int
+
+
+class TimeEntryCreate(TimeEntryBase):
+    pass
+
+
+class TimeEntryUpdate(BaseModel):
+    date: Optional[date] = None
+    hours_worked: Optional[float] = None
+    description: Optional[str] = None
+    project_id: Optional[int] = None
+
+
+class TimeEntryRead(TimeEntryBase):
+    id: int
+    user_id: int
+
+    class Config:
+        from_attributes = True
+---FILE_END app/schemas.py---
+---FILE_START app/core/__init__.py---
+# This file can be empty.
+---FILE_END app/core/__init__.py---
+---FILE_START app/core/config.py---
+from pydantic_settings import BaseSettings
+
+class Settings(BaseSettings):
+    DB_URL: str = "sqlite:///./test.db"
+    SECRET_KEY: str = "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7"
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+
+    class Config:
+        env_file = ".env"
+
+settings = Settings()
+---FILE_END app/core/config.py---
+---FILE_START app/core/db.py---
+from sqlmodel import create_engine, Session, SQLModel
+from app.core.config import settings
+
+# The connect_args is needed only for SQLite
+connect_args = {"check_same_thread": False} if "sqlite" in settings.DB_URL else {}
+engine = create_engine(settings.DB_URL, echo=True, connect_args=connect_args)
+
+def create_db_and_tables():
+    # Import all models here before calling create_all
+    # so that they are registered with SQLModel's metadata
+    from app import models 
+    SQLModel.metadata.create_all(engine)
+
+def get_session():
+    with Session(engine) as session:
+        yield session
+---FILE_END app/core/db.py---
+---FILE_START app/core/security.py---
+from datetime import datetime, timedelta, timezone
+from typing import Any, Union
+from jose import jwt
+from passlib.context import CryptContext
+from app.core.config import settings
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+ALGORITHM = settings.ALGORITHM
+SECRET_KEY = settings.SECRET_KEY
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
+
+def create_access_token(subject: Union[str, Any], expires_delta: timedelta = None) -> str:
+    if expires_delta:
+        expire = datetime.now(timezone.utc) + expires_delta
+    else:
+        expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode = {"exp": expire, "sub": str(subject)}
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
+---FILE_END app/core/security.py---
+---FILE_START app/api/__init__.py---
+# This file can be empty.
+---FILE_END app/api/__init__.py---
+---FILE_START app/api/deps.py---
+from typing import Generator, Optional
+
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
+from pydantic import ValidationError
+from sqlmodel import Session, select
+
+from app.core import security
+from app.core.config import settings
+from app.core.db import engine
+from app.models import User, UserRole
+from app.schemas import TokenData
+
+reusable_oauth2 = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+
+
+def get_session() -> Generator:
+    with Session(engine) as session:
+        yield session
+
+
+def get_current_user(
+    session: Session = Depends(get_session), token: str = Depends(reusable_oauth2)
+) -> User:
+    try:
+        payload = jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
+        token_data = TokenData(email=payload.get("sub"))
+    except (JWTError, ValidationError):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Could not validate credentials",
+        )
+    user = session.exec(select(User).where(User.email == token_data.email)).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not user.is_active:
+        raise HTTPException(status_code=400, detail="Inactive user")
+    return user
+
+
+def get_current_active_admin(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    if current_user.role != UserRole.admin:
+        raise HTTPException(
+            status_code=403, detail="The user doesn't have enough privileges"
+        )
+    return current_user
+---FILE_END app/api/deps.py---
+---FILE_START app/api/routes.py---
+from datetime import date, timedelta
+from typing import Any, List
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlmodel import Session, select
+
+from app.api import deps
+from app.core import security
+from app.core.config import settings
+from app.models import Project, TimeEntry, User, UserRole
+from app.schemas import (
+    ProjectCreate,
+    ProjectRead,
+    TimeEntryCreate,
+    TimeEntryRead,
+    Token,
+    UserCreate,
+    UserRead,
+)
+
+# Main router that includes all other routers
+router = APIRouter()
+
+# --- Auth Router ---
+auth_router = APIRouter()
+
+@auth_router.post("/login", response_model=Token)
+def login_for_access_token(
+    session: Session = Depends(deps.get_session),
+    form_data: OAuth2PasswordRequestForm = Depends(),
+) -> Any:
+    user = session.exec(select(User).where(User.email == form_data.username)).first()
+    if not user or not security.verify_password(
+        form_data.password, user.hashed_password
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not user.is_active:
+        raise HTTPException(status_code=400, detail="Inactive user")
+
+    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = security.create_access_token(
+        user.email, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+# --- Users Router (Admin) ---
+users_router = APIRouter()
+
+@users_router.post("/", response_model=UserRead, status_code=status.HTTP_201_CREATED)
+def create_user(
+    *,
+    session: Session = Depends(deps.get_session),
+    user_in: UserCreate,
+    current_user: User = Depends(deps.get_current_active_admin),
+) -> Any:
+    user = session.exec(select(User).where(User.email == user_in.email)).first()
+    if user:
+        raise HTTPException(
+            status_code=400, detail="The user with this email already exists."
+        )
+
+    user_data = user_in.model_dump()
+    user_data["hashed_password"] = security.get_password_hash(user_in.password)
+    del user_data["password"]
+    
+    db_user = User(**user_data)
+    session.add(db_user)
+    session.commit()
+    session.refresh(db_user)
+    return db_user
+
+
+@users_router.get("/", response_model=List[UserRead])
+def read_users(
+    session: Session = Depends(deps.get_session),
+    skip: int = 0,
+    limit: int = 100,
+    current_user: User = Depends(deps.get_current_active_admin),
+) -> Any:
+    users = session.exec(select(User).offset(skip).limit(limit)).all()
+    return users
+
+
+# --- Projects Router ---
+projects_router = APIRouter()
+
+@projects_router.post("/", response_model=ProjectRead, status_code=status.HTTP_201_CREATED)
+def create_project(
+    *,
+    session: Session = Depends(deps.get_session),
+    project_in: ProjectCreate,
+    current_user: User = Depends(deps.get_current_active_admin),
+):
+    project = Project.model_validate(project_in)
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+    return project
+
+
+@projects_router.get("/", response_model=List[ProjectRead])
+def read_projects(
+    session: Session = Depends(deps.get_session),
+    skip: int = 0,
+    limit: int = 100,
+    current_user: User = Depends(deps.get_current_user),
+):
+    projects = session.exec(select(Project).where(Project.is_active == True).offset(skip).limit(limit)).all()
+    return projects
+
+
+# --- Time Entries Router ---
+time_entries_router = APIRouter()
+
+@time_entries_router.post("/", response_model=TimeEntryRead, status_code=status.HTTP_201_CREATED)
+def create_time_entry(
+    *,
+    session: Session = Depends(deps.get_session),
+    entry_in: TimeEntryCreate,
+    current_user: User = Depends(deps.get_current_user),
+):
+    entry = TimeEntry.model_validate(entry_in, update={"user_id": current_user.id})
+    session.add(entry)
+    session.commit()
+    session.refresh(entry)
+    return entry
+
+
+@time_entries_router.get("/me", response_model=List[TimeEntryRead])
+def read_my_time_entries(
+    session: Session = Depends(deps.get_session),
+    current_user: User = Depends(deps.get_current_user),
+):
+    entries = session.exec(select(TimeEntry).where(TimeEntry.user_id == current_user.id)).all()
+    return entries
+
+
+# --- Reports Router (Manager) ---
+reports_router = APIRouter()
+
+@reports_router.get("/team", response_model=List[TimeEntryRead])
+def read_team_time_entries(
+    session: Session = Depends(deps.get_session),
+    current_user: User = Depends(deps.get_current_user),
+):
+    if current_user.role not in [UserRole.manager, UserRole.admin]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    team_member_ids = [member.id for member in current_user.team_members]
+    if not team_member_ids:
+        return []
+
+    entries = session.exec(
+        select(TimeEntry).where(TimeEntry.user_id.in_(team_member_ids))
+    ).all()
+    return entries
+
+# Include all routers in the main router
+router.include_router(auth_router, prefix="/auth", tags=["auth"])
+router.include_router(users_router, prefix="/users", tags=["users"])
+router.include_router(projects_router, prefix="/projects", tags=["projects"])
+router.include_router(time_entries_router, prefix="/time-entries", tags=["time-entries"])
+router.include_router(reports_router, prefix="/reports", tags=["reports"])
+---FILE_END app/api/routes.py---
